@@ -69,6 +69,25 @@ func getMembershipList(g []*GroupMember) string {
 	return strings.Join(out, ",")
 }
 
+// Windows' CreateProcess caps the command line at 8191 chars, so we keep
+// each batch well under that ceiling.
+const groupMembershipBatchSize = 50
+
+func chunkGroupMembers(members []*GroupMember, size int) [][]*GroupMember {
+	if size <= 0 || len(members) <= size {
+		return [][]*GroupMember{members}
+	}
+	var batches [][]*GroupMember
+	for i := 0; i < len(members); i += size {
+		end := i + size
+		if end > len(members) {
+			end = len(members)
+		}
+		batches = append(batches, members[i:end])
+	}
+	return batches
+}
+
 func (g *GroupMembership) getGroupMembers(conf *config.ProviderConf) ([]*GroupMember, error) {
 	cmd := fmt.Sprintf("Get-ADGroupMember -Identity %q", g.GroupGUID)
 	psOpts := CreatePSCommandOpts{
@@ -105,24 +124,26 @@ func (g *GroupMembership) bulkGroupMembersOp(conf *config.ProviderConf, operatio
 		return nil
 	}
 
-	memberList := getMembershipList(members)
-	cmd := fmt.Sprintf("%s -Identity %q %s -Confirm:$false", operation, g.GroupGUID, memberList)
-	psOpts := CreatePSCommandOpts{
-		JSONOutput:      false,
-		ForceArray:      false,
-		ExecLocally:     conf.IsConnectionTypeLocal(),
-		PassCredentials: conf.IsPassCredentialsEnabled(),
-		Username:        conf.Settings.WinRMUsername,
-		Password:        conf.Settings.WinRMPassword,
-		Server:          conf.IdentifyDomainController(),
-	}
-	psCmd := NewPSCommand([]string{cmd}, psOpts)
-	result, err := psCmd.Run(conf)
+	for _, batch := range chunkGroupMembers(members, groupMembershipBatchSize) {
+		memberList := getMembershipList(batch)
+		cmd := fmt.Sprintf("%s -Identity %q -Members %s -Confirm:$false", operation, g.GroupGUID, memberList)
+		psOpts := CreatePSCommandOpts{
+			JSONOutput:      false,
+			ForceArray:      false,
+			ExecLocally:     conf.IsConnectionTypeLocal(),
+			PassCredentials: conf.IsPassCredentialsEnabled(),
+			Username:        conf.Settings.WinRMUsername,
+			Password:        conf.Settings.WinRMPassword,
+			Server:          conf.IdentifyDomainController(),
+		}
+		psCmd := NewPSCommand([]string{cmd}, psOpts)
+		result, err := psCmd.Run(conf)
 
-	if err != nil {
-		return fmt.Errorf("while running %s: %s", operation, err)
-	} else if result.ExitCode != 0 {
-		return fmt.Errorf("command %s exited with a non-zero exit code(%d), stderr: %s, stdout: %s", operation, result.ExitCode, result.StdErr, result.Stdout)
+		if err != nil {
+			return fmt.Errorf("while running %s: %s", operation, err)
+		} else if result.ExitCode != 0 {
+			return fmt.Errorf("command %s exited with a non-zero exit code(%d), stderr: %s, stdout: %s", operation, result.ExitCode, result.StdErr, result.Stdout)
+		}
 	}
 
 	return nil
@@ -161,26 +182,7 @@ func (g *GroupMembership) Create(conf *config.ProviderConf) error {
 		return nil
 	}
 
-	memberList := getMembershipList(g.GroupMembers)
-	cmds := []string{fmt.Sprintf("Add-ADGroupMember -Identity %q -Members %s", g.GroupGUID, memberList)}
-	psOpts := CreatePSCommandOpts{
-		JSONOutput:      false,
-		ForceArray:      false,
-		ExecLocally:     conf.IsConnectionTypeLocal(),
-		PassCredentials: conf.IsPassCredentialsEnabled(),
-		Username:        conf.Settings.WinRMUsername,
-		Password:        conf.Settings.WinRMPassword,
-		Server:          conf.IdentifyDomainController(),
-	}
-	psCmd := NewPSCommand(cmds, psOpts)
-	result, err := psCmd.Run(conf)
-	if err != nil {
-		return fmt.Errorf("while running Add-ADGroupMember: %s", err)
-	} else if result.ExitCode != 0 {
-		return fmt.Errorf("command Add-ADGroupMember exited with a non-zero exit code(%d), stderr: %s, stdout: %s", result.ExitCode, result.StdErr, result.Stdout)
-	}
-
-	return nil
+	return g.bulkGroupMembersOp(conf, "Add-ADGroupMember", g.GroupMembers)
 }
 
 func (g *GroupMembership) Delete(conf *config.ProviderConf) error {
