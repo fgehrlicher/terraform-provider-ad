@@ -69,7 +69,7 @@ func getMembershipList(g []*GroupMember) string {
 	return strings.Join(out, ",")
 }
 
-// Windows' CreateProcess caps the command line at 8191 chars, so we keep
+// Windows CreateProcess caps the command line at 8191 chars, so we keep
 // each batch well under that ceiling.
 const groupMembershipBatchSize = 50
 
@@ -79,10 +79,7 @@ func chunkGroupMembers(members []*GroupMember, size int) [][]*GroupMember {
 	}
 	var batches [][]*GroupMember
 	for i := 0; i < len(members); i += size {
-		end := i + size
-		if end > len(members) {
-			end = len(members)
-		}
+		end := min(i+size, len(members))
 		batches = append(batches, members[i:end])
 	}
 	return batches
